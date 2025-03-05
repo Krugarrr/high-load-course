@@ -41,11 +41,8 @@ class PaymentExternalSystemAdapterImpl(
     private val parallelRequests = properties.parallelRequests
 
     private val client = OkHttpClient.Builder().build()
-    private val rateLimiter =
-        //LeakingBucketRateLimiter(rateLimitPerSec.toLong(), requestAverageProcessingTime, parallelRequests)
-
-    SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
-    //CountingRateLimiter(rateLimitPerSec/ 2, requestAverageProcessingTime.toMillis() / 2 - 2, TimeUnit.MILLISECONDS)
+    private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
+    private val semaphore = Semaphore(parallelRequests)
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
 
         logger.info("requestAverageProcessingTime: [${requestAverageProcessingTime}]")
@@ -69,6 +66,7 @@ class PaymentExternalSystemAdapterImpl(
 
         try {
             rateLimiter.tickBlocking()
+            semaphore.tryAcquire()
             client.newCall(request).execute().use { response ->
                 val body = try {
                     mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
@@ -103,6 +101,9 @@ class PaymentExternalSystemAdapterImpl(
                 }
             }
 
+        }
+        finally {
+            semaphore.release()
         }
     }
 
