@@ -84,7 +84,8 @@ class PaymentExternalSystemAdapterImpl(
             }
 
             run loop@{
-                (1..2).forEach {
+                (1..10).forEach {
+                    var i = 0
                     rateLimiter.tickBlocking()
                     if (now() >= deadline) {
                         paymentESService.update(paymentId) {
@@ -101,19 +102,15 @@ class PaymentExternalSystemAdapterImpl(
                             logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
                             ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
                         }
-                        //
 
                         if (!body.result) {
-                            PrintWriter(file).use { writer ->
-                                writer.printf("Unsuccessful %d", end-start)
-                            }
+                            file.appendText("- ${end-start} ${i}\n")
+                            i += 1
                             logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, body: $response")
                             return@forEach
                         }
 
-                        PrintWriter(file).use { writer ->
-                            writer.printf("Success %d", end-start)
-                        }
+                        file.appendText("+ ${end-start} ${i}\n")
                         logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
                         // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
