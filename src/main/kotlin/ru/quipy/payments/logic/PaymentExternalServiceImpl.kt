@@ -14,6 +14,8 @@ import ru.quipy.common.utils.LeakingBucketRateLimiter
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
+import java.io.File
+import java.io.PrintWriter
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
@@ -44,6 +46,8 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
     private val semaphore = Semaphore(parallelRequests, true)
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+
+        val file = File("file.txt")
         logger.info("requestAverageProcessingTime: [${requestAverageProcessingTime}]")
         logger.info("rateLimitPerSec: [$rateLimitPerSec]")
         logger.info("paymentStartedAt: [$paymentStartedAt]")
@@ -88,21 +92,28 @@ class PaymentExternalSystemAdapterImpl(
                         }
                         return@loop
                     }
-
+                    val start = now()
                     client.newCall(request).execute().use { response ->
-
+                        val end = now()
                         val body = try {
                             mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
                         } catch (e: Exception) {
                             logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
                             ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
                         }
+                        //
 
                         if (!body.result) {
+                            PrintWriter(file).use { writer ->
+                                writer.printf("Unsuccessful %d", end-start)
+                            }
                             logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, body: $response")
                             return@forEach
                         }
 
+                        PrintWriter(file).use { writer ->
+                            writer.printf("Success %d", end-start)
+                        }
                         logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
                         // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
