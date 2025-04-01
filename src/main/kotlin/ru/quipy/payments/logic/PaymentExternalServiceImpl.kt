@@ -5,6 +5,7 @@ import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import org.apache.commons.collections4.queue.CircularFifoQueue
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatus
 import org.springframework.web.server.ResponseStatusException
@@ -22,7 +23,6 @@ import java.util.*
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 
-
 // Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
     private val properties: PaymentAccountProperties,
@@ -31,7 +31,6 @@ class PaymentExternalSystemAdapterImpl(
 
     companion object {
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
-
         val emptyBody = RequestBody.create(null, ByteArray(0))
         val mapper = ObjectMapper().registerKotlinModule()
     }
@@ -41,6 +40,9 @@ class PaymentExternalSystemAdapterImpl(
     private val requestAverageProcessingTime = properties.averageProcessingTime
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
+
+    private val requestTimesParticular = CircularFifoQueue<Long>()
+    private val requestTimesAll = mutableListOf<Long>()
 
     private val client = OkHttpClient.Builder().build()
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
@@ -85,7 +87,7 @@ class PaymentExternalSystemAdapterImpl(
 
             run loop@{
                 (1..10).forEach {
-                    var i = 0
+                    var i = 0;
                     rateLimiter.tickBlocking()
                     if (now() >= deadline) {
                         paymentESService.update(paymentId) {
@@ -93,9 +95,12 @@ class PaymentExternalSystemAdapterImpl(
                         }
                         return@loop
                     }
-                    val start = now()
+                    val reqStart = now()
                     client.newCall(request).execute().use { response ->
-                        val end = now()
+                        val reqEnd = now()
+                        val reqTime = reqEnd - reqStart
+                        requestTimesAll.add(reqTime)
+                        requestTimesParticular.add(reqTime)
                         val body = try {
                             mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
                         } catch (e: Exception) {
@@ -104,13 +109,13 @@ class PaymentExternalSystemAdapterImpl(
                         }
 
                         if (!body.result) {
-                            file.appendText("- ${end-start} ${i}\n")
+                            file.appendText("- ${reqEnd-reqStart} ${i}\n")
                             i += 1
                             logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, body: $response")
                             return@forEach
                         }
 
-                        file.appendText("+ ${end-start} ${i}\n")
+                        file.appendText("+ ${reqEnd-reqStart} ${i}\n")
                         logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
                         // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
