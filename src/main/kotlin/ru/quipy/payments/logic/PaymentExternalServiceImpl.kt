@@ -41,15 +41,15 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val requestTimesParticular = CircularFifoQueue<Long>()
+    private val requestTimesParticular = CircularFifoQueue<Long>(100)
     private val requestTimesAll = mutableListOf<Long>()
 
-    private val client = OkHttpClient.Builder().build()
+    private var client = OkHttpClient.Builder().callTimeout(0, TimeUnit.MILLISECONDS).build()
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
     private val semaphore = Semaphore(parallelRequests, true)
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
 
-        val file = File("file.txt")
+        val file = File("fileSorted.txt")
         logger.info("requestAverageProcessingTime: [${requestAverageProcessingTime}]")
         logger.info("rateLimitPerSec: [$rateLimitPerSec]")
         logger.info("paymentStartedAt: [$paymentStartedAt]")
@@ -85,47 +85,34 @@ class PaymentExternalSystemAdapterImpl(
                 return
             }
 
-            run loop@{
-                (1..10).forEach {
-                    var i = 0;
-                    rateLimiter.tickBlocking()
-                    if (now() >= deadline) {
-                        paymentESService.update(paymentId) {
-                            it.logProcessing(false, now(), transactionId, reason = "Deadline breached")
-                        }
-                        return@loop
+            rateLimiter.tickBlocking()
+
+            val reqStart = now()
+            client = OkHttpClient.Builder().callTimeout(calcPercentile(), TimeUnit.MILLISECONDS).build()
+            while (reqStart + 1200 < deadline) {
+                client.newCall(request).execute().use { response ->
+                    val reqEnd = now()
+                    val reqTime = reqEnd - reqStart
+                    requestTimesAll.add(reqTime)
+                    requestTimesParticular.add(reqTime)
+                    val body = try {
+                        mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
+                    } catch (e: Exception) {
+                        logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
+                        ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
                     }
-                    val reqStart = now()
-                    client.newCall(request).execute().use { response ->
-                        val reqEnd = now()
-                        val reqTime = reqEnd - reqStart
-                        requestTimesAll.add(reqTime)
-                        requestTimesParticular.add(reqTime)
-                        val body = try {
-                            mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
-                        } catch (e: Exception) {
-                            logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
-                            ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
-                        }
 
-                        if (!body.result) {
-                            file.appendText("- ${reqEnd-reqStart} ${i}\n")
-                            i += 1
-                            logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, body: $response")
-                            return@forEach
-                        }
+                    logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
-                        file.appendText("+ ${reqEnd-reqStart} ${i}\n")
-                        logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
-
-                        // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
-                        // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
-                        paymentESService.update(paymentId) {
-                            it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                        }
-                        return@loop
+                    // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
+                    // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(body.result, now(), transactionId, reason = body.message)
                     }
                 }
+                return
+
+
             }
         } catch (e: Exception) {
             when (e) {
@@ -148,6 +135,15 @@ class PaymentExternalSystemAdapterImpl(
         } finally {
             if (acquire) semaphore.release()
         }
+    }
+
+    fun calcPercentile(): Long {
+//        if (requestTimesParticular.count() < 100) return 1200;
+//        val sortedBuffer = requestTimesParticular.sorted()
+//        val sortedBuffer90PC = sortedBuffer.take((sortedBuffer.size * 0.9).toInt())
+//        return sortedBuffer90PC.last()
+        return 1200
+
     }
 
     override fun price() = properties.price
