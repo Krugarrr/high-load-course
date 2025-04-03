@@ -41,15 +41,14 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val requestTimesParticular = CircularFifoQueue<Long>(100)
     private val requestTimesAll = mutableListOf<Long>()
 
     private var client = OkHttpClient.Builder().callTimeout(0, TimeUnit.MILLISECONDS).build()
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
     private val semaphore = Semaphore(parallelRequests, true)
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+        val file = File("case5.txt")
 
-        val file = File("fileSorted.txt")
         logger.info("requestAverageProcessingTime: [${requestAverageProcessingTime}]")
         logger.info("rateLimitPerSec: [$rateLimitPerSec]")
         logger.info("paymentStartedAt: [$paymentStartedAt]")
@@ -61,6 +60,7 @@ class PaymentExternalSystemAdapterImpl(
 
         // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
         // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования.
+
         paymentESService.update(paymentId) {
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
         }
@@ -84,31 +84,38 @@ class PaymentExternalSystemAdapterImpl(
                 }
                 return
             }
+            if (now() + 1200 > deadline ) {
+                logger.info("Deadline breached")
+                paymentESService.update(paymentId) {
+                    it.logProcessing(false, now(), transactionId, reason = "Request timeout: Deadline breached")
+                }
+                return
+            }
 
-            rateLimiter.tickBlocking()
-
+            client = OkHttpClient.Builder()
+                .callTimeout(1200, TimeUnit.MILLISECONDS)
+                .connectTimeout(1200, TimeUnit.MILLISECONDS)
+                .readTimeout(1200, TimeUnit.MILLISECONDS)
+                .callTimeout(1200, TimeUnit.MILLISECONDS)
+                .writeTimeout(1200, TimeUnit.MILLISECONDS)
+                .build()
             val reqStart = now()
-            client = OkHttpClient.Builder().callTimeout(calcPercentile(), TimeUnit.MILLISECONDS).build()
-            while (reqStart + 1200 < deadline) {
-                client.newCall(request).execute().use { response ->
-                    val reqEnd = now()
-                    val reqTime = reqEnd - reqStart
-                    requestTimesAll.add(reqTime)
-                    requestTimesParticular.add(reqTime)
-                    val body = try {
-                        mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
-                    } catch (e: Exception) {
-                        logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
-                        ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
-                    }
+            rateLimiter.tickBlocking()
+            client.newCall(request).execute().use { response ->
+                val body = try {
+                    mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
+                } catch (e: Exception) {
+                    logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
+                    ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
 
-                    logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
+                }
+                file.appendText("${now() - reqStart}}\n")
+                logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
-                    // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
-                    // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                    }
+                // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
+                // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
+                paymentESService.update(paymentId) {
+                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
                 }
                 return
 
