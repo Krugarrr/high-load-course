@@ -42,7 +42,7 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val client = OkHttpClient.Builder().build()
+    private var client = OkHttpClient.Builder().build()
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
     private val semaphore = Semaphore(parallelRequests, true)
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
@@ -83,16 +83,11 @@ class PaymentExternalSystemAdapterImpl(
                 return
             }
 
+            client = OkHttpClient.Builder().callTimeout(deadline - now(), TimeUnit.MILLISECONDS).build()
             run loop@{
-                (1..10).forEach {
+                (1..2).forEach {
                     var i = 0
                     rateLimiter.tickBlocking()
-                    if (now() >= deadline) {
-                        paymentESService.update(paymentId) {
-                            it.logProcessing(false, now(), transactionId, reason = "Deadline breached")
-                        }
-                        return@loop
-                    }
                     val start = now()
                     client.newCall(request).execute().use { response ->
                         val end = now()
