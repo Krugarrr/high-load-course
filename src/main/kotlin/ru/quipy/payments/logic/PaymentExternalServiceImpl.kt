@@ -42,7 +42,6 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val requestTimesAll = mutableListOf<Long>()
 
     private var client = OkHttpClient.Builder()
         .callTimeout(1200, TimeUnit.MILLISECONDS)
@@ -90,19 +89,22 @@ class PaymentExternalSystemAdapterImpl(
 
             rateLimiter.tickBlocking()
             var i = 0
-            run outerLoop@ {
+            run outerLoop@{
                 while (now() + 1200 < deadline) {
-                    run loop@ {
+                    run loop@{
                         val reqStart = now()
                         try {
                             client.newCall(request).execute().use { response ->
                                 val body = try {
                                     mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
-                                }
-
-                                catch (e: Exception) {
+                                } catch (e: Exception) {
                                     logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
-                                    ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
+                                    ExternalSysResponse(
+                                        transactionId.toString(),
+                                        paymentId.toString(),
+                                        false,
+                                        e.message
+                                    )
                                 }
 
                                 file.appendText("${now() - reqStart} $i success\n")
