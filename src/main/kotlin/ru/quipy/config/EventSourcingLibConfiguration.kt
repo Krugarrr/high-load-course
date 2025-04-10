@@ -1,12 +1,15 @@
 package ru.quipy.config
 
+import org.apache.coyote.http2.Http2Protocol
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.web.embedded.tomcat.TomcatConnectorCustomizer
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import ru.quipy.core.EventSourcingServiceFactory
 import ru.quipy.payments.api.PaymentAggregate
 import ru.quipy.payments.logic.PaymentAggregateState
+import ru.quipy.payments.logic.PaymentExternalSystemAdapterImpl
 import ru.quipy.streams.AggregateEventStreamManager
 import java.util.*
 import javax.annotation.PostConstruct
@@ -48,6 +51,17 @@ class EventSourcingLibConfiguration {
      */
     @Bean
     fun paymentsEsService() = eventSourcingServiceFactory.create<UUID, PaymentAggregate, PaymentAggregateState>()
+
+    @Bean
+    fun tomcatConnectorCustomizer(): TomcatConnectorCustomizer {
+        return TomcatConnectorCustomizer {
+            try {
+                (it.protocolHandler.findUpgradeProtocols().get(0) as Http2Protocol).maxConcurrentStreams = 10_000_000
+            } catch (e: Exception) {
+                PaymentExternalSystemAdapterImpl.logger.error("!!! Failed to increase number of http2 streams per connection !!!")
+            }
+        }
+    }
 
     @PostConstruct
     fun init() {
