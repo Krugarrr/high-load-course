@@ -23,6 +23,7 @@ import java.time.Duration
 import java.util.*
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
+import kotlin.time.toDuration
 
 // Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
@@ -41,11 +42,14 @@ class PaymentExternalSystemAdapterImpl(
     private val requestAverageProcessingTime = properties.averageProcessingTime
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
+    private val retryTime: Long = 1100
+    private val requestTimeout = Duration.ofMillis(1100)
 
 
     private var client = OkHttpClient.Builder()
-        .callTimeout(1200, TimeUnit.MILLISECONDS)
+        .callTimeout(retryTime, TimeUnit.MILLISECONDS)
         .build()
+
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
     private val semaphore = Semaphore(parallelRequests, true)
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
@@ -68,13 +72,14 @@ class PaymentExternalSystemAdapterImpl(
         }
 
         val request = Request.Builder().run {
-            url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
+            url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId&paymentId=$paymentId&amount=$amount&timeout=${formatDurationAsIso(requestTimeout)}")
             post(emptyBody)
         }.build()
         val acquire = semaphore.tryAcquire(requestAverageProcessingTime.toSeconds(), TimeUnit.SECONDS)
         try {
 
             if (!acquire) {
+                file.appendText("$0 0 semaphore\n")
                 logger.error("[$accountName] Payment $paymentId could not acquire semaphore before the deadline. Time left:  ms")
                 paymentESService.update(paymentId) {
                     it.logProcessing(
@@ -90,7 +95,7 @@ class PaymentExternalSystemAdapterImpl(
             rateLimiter.tickBlocking()
             var i = 0
             run outerLoop@{
-                while (now() + 1200 < deadline) {
+                while (now() + retryTime < deadline) {
                     run loop@{
                         val reqStart = now()
                         try {
@@ -126,6 +131,7 @@ class PaymentExternalSystemAdapterImpl(
                 }
             }
         } catch (e: Exception) {
+            file.appendText("$0 other exception\n")
             when (e) {
                 is SocketTimeoutException -> {
                     logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
@@ -155,6 +161,11 @@ class PaymentExternalSystemAdapterImpl(
 //        return sortedBuffer90PC.last()
         return 1200
 
+    }
+
+    fun formatDurationAsIso(duration: Duration): String {
+        val seconds = duration.toMillis() / 1000.0
+        return "PT${"%.3f".format(Locale.US, seconds)}S"
     }
 
     override fun price() = properties.price
