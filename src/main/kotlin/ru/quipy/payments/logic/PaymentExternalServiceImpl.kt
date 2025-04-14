@@ -34,6 +34,8 @@ class PaymentExternalSystemAdapterImpl(
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
         val emptyBody = RequestBody.create(null, ByteArray(0))
         val mapper = ObjectMapper().registerKotlinModule()
+        const val DEADLINE_HEADER = "X-Request-Deadline"
+        const val TIMEOUT_HEADER = "X-Request-Timeout"
     }
 
     private val serviceName = properties.serviceName
@@ -42,9 +44,8 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-
     private var client = OkHttpClient.Builder()
-        .callTimeout(1200, TimeUnit.MILLISECONDS)
+        .callTimeout(Duration.ofMillis(1200))
         .build()
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
     private val semaphore = Semaphore(parallelRequests, true)
@@ -68,12 +69,15 @@ class PaymentExternalSystemAdapterImpl(
         }
 
         val request = Request.Builder().run {
-            url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
+            url(
+                "http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId&paymentId=$paymentId&amount=$amount&timeout=${Duration.ofMillis(1200).toString()}&deadline=$deadline"
+            )
+         //   header(DEADLINE_HEADER, (0).toString())
             post(emptyBody)
         }.build()
-        val acquire = semaphore.tryAcquire(requestAverageProcessingTime.toSeconds(), TimeUnit.SECONDS)
+        var acquire = false;
         try {
-
+            acquire = semaphore.tryAcquire(requestAverageProcessingTime.toMillis(), TimeUnit.MILLISECONDS)
             if (!acquire) {
                 logger.error("[$accountName] Payment $paymentId could not acquire semaphore before the deadline. Time left:  ms")
                 paymentESService.update(paymentId) {
