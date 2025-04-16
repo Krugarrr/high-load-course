@@ -42,9 +42,21 @@ class PaymentExternalSystemAdapterImpl(
     private val parallelRequests = properties.parallelRequests
 
 
-    private var client = OkHttpClient.Builder()
+    private val connectionPool = ConnectionPool(
+        maxIdleConnections = 100,
+        keepAliveDuration = 5,
+        timeUnit = TimeUnit.MINUTES
+    )
+
+    private val client = OkHttpClient.Builder()
         .callTimeout(1200, TimeUnit.MILLISECONDS)
         .protocols(listOf(Protocol.H2_PRIOR_KNOWLEDGE))
+        .dispatcher(Dispatcher().apply {
+            maxRequests = properties.parallelRequests
+            maxRequestsPerHost = properties.parallelRequests
+        })
+        .connectionPool(connectionPool)
+        .retryOnConnectionFailure(true)
         .build()
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
     private val semaphore = Semaphore(parallelRequests, true)
@@ -74,7 +86,7 @@ class PaymentExternalSystemAdapterImpl(
 
         rateLimiter.tickBlocking()
 
-        client.newCall(request).enqueue(object : Callback {
+        client.newCall(request).enqueue (object : Callback {
             override fun onResponse(call: Call, response: Response) {
                 try {
                     val body = try {
@@ -114,7 +126,8 @@ class PaymentExternalSystemAdapterImpl(
                         it.logProcessing(false, now(), transactionId, reason = reason)
                     }
                 } finally {
-                    semaphore.release()
+                    if (acquire)
+                        semaphore.release()
                 }
             }
         })
